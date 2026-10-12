@@ -1,0 +1,32 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Python virtual environments and cache
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors and operating system
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Logs and local container configuration
+*.log
+Dockerfile
+docker-compose.yml
+# Temporary Microsoft Office lock files
+~$*
+
+# Keep local assignment seed data out of the public repository
+/sample_data/
+/sample_seed.py
