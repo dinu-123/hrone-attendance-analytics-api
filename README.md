@@ -45,7 +45,9 @@ For local testing, use a dedicated disposable database and configure `MONGO_URI`
 
 Focused manual tests covered timestamp handling, overnight shifts, late and overtime calculations, punch-in and punch-out concurrency, regularization and audit history, analytics, pagination, and validation.
 
-The five explain endpoints were tested against 100,000 synthetic attendance records. All five reported at least one `IXSCAN` stage and no `COLLSCAN` stage. Synthetic test records were removed after testing.
+The five explain endpoints were tested against a synthetic dataset of 10,000 employees and 100,000 attendance records. All five reported at least one `IXSCAN` stage and no `COLLSCAN` stage. The department trend lookup also reported zero collection scans and used the attendance and employee indexes.
+
+The department trend optimization was tested for a 10-day Engineering range. Using the same three-request benchmark, the original median was 8,751.1 ms and the optimized version's median was 458.4 ms, approximately 94.8% lower. In a separate run with one warm-up and five measured requests, the optimized median was 426.3 ms. These are local measurements, not a controlled production benchmark. The optimized response matched the original daily fields. Additional checks covered mid-month joiners, missing-attendance dates, weekends, the 92-day limit, and invalid date ranges. The disposable synthetic benchmark database was deleted after testing; no benchmark dataset is included in this repository.
 
 These tests do not guarantee a particular evaluator score or replace a complete automated regression suite.
 

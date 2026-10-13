@@ -1928,7 +1928,7 @@ def department_trend(
             detail="Date range must not exceed 92 days",
         )
 
-    # Return 404 when the department has no employees.
+    # Keep the required 404 for a department that has no employees.
     if db.employees.find_one(
         {"department": department},
         {"_id": 1},
@@ -1938,15 +1938,22 @@ def department_trend(
             detail="Department not found",
         )
 
-    # Generate every calendar date inside MongoDB.
-    # This includes dates without any attendance records.
+    # Collect this department's employee codes once. The array-valued localField
+    # joins only these employees' logs through the {emp_code, date} index.
+    # Attendance is grouped by date before the inclusive date series is expanded.
     pipeline = [
         {"$match": {"department": department}},
-        {"$limit": 1},
+        {
+            "$group": {
+                "_id": "$department",
+                "employee_codes": {"$addToSet": "$emp_code"},
+            }
+        },
         {
             "$project": {
                 "_id": 0,
-                "department": "$department",
+                "department": "$_id",
+                "employee_codes": 1,
                 "dates": {
                     "$map": {
                         "input": {"$range": [0, day_count]},
@@ -1956,17 +1963,8 @@ def department_trend(
                                 "format": "%Y-%m-%d",
                                 "date": {
                                     "$add": [
-                                        {
-                                            "$dateFromString": {
-                                                "dateString": from_date
-                                            }
-                                        },
-                                        {
-                                            "$multiply": [
-                                                "$$offset",
-                                                86400000,
-                                            ]
-                                        },
+                                        {"$dateFromString": {"dateString": from_date}},
+                                        {"$multiply": ["$$offset", 86400000]},
                                     ]
                                 },
                             }
@@ -1975,40 +1973,61 @@ def department_trend(
                 },
             }
         },
+        {
+            "$lookup": {
+                "from": "attendance_logs",
+                "localField": "employee_codes",
+                "foreignField": "emp_code",
+                "pipeline": [
+                    {"$match": {"date": {"$gte": from_date, "$lte": to_date}}},
+                    {
+                        "$group": {
+                            "_id": "$date",
+                            "present_count": {
+                                "$sum": {
+                                    "$cond": [
+                                        {"$in": ["$status", ["PRESENT", "WFH", "ON_DUTY"]]},
+                                        {"$cond": [{"$eq": ["$half_day", True]}, 0.5, 1]},
+                                        0,
+                                    ]
+                                }
+                            },
+                            "late_count": {
+                                "$sum": {
+                                    "$cond": [
+                                        {"$gt": [{"$ifNull": ["$late_minutes", 0]}, 0]},
+                                        1,
+                                        0,
+                                    ]
+                                }
+                            },
+                        }
+                    },
+                ],
+                "as": "attendance_by_date",
+            }
+        },
         {"$unwind": "$dates"},
         {
             "$project": {
                 "_id": 0,
                 "department": 1,
                 "date": "$dates",
+                "attendance_by_date": 1,
             }
         },
-
-        # Count employees who had joined on or before each date.
+        # Headcount remains based on employment date, not attendance records.
         {
             "$lookup": {
                 "from": "employees",
-                "let": {
-                    "target_date": "$date",
-                    "target_department": "$department",
-                },
+                "let": {"target_date": "$date", "target_department": "$department"},
                 "pipeline": [
                     {
                         "$match": {
                             "$expr": {
                                 "$and": [
-                                    {
-                                        "$eq": [
-                                            "$department",
-                                            "$$target_department",
-                                        ]
-                                    },
-                                    {
-                                        "$lte": [
-                                            "$joined_on",
-                                            "$$target_date",
-                                        ]
-                                    },
+                                    {"$eq": ["$department", "$$target_department"]},
+                                    {"$lte": ["$joined_on", "$$target_date"]},
                                 ]
                             }
                         }
@@ -2018,151 +2037,64 @@ def department_trend(
                 "as": "headcount_data",
             }
         },
-
-        # Calculate presence and late counts for each calendar date.
-        {
-            "$lookup": {
-                "from": "attendance_logs",
-                "let": {
-                    "target_date": "$date",
-                    "target_department": "$department",
-                },
-                "pipeline": [
-                    {
-                        "$match": {
-                            "$expr": {
-                                "$eq": ["$date", "$$target_date"]
-                            }
-                        }
-                    },
-                    {
-                        "$lookup": {
-                            "from": "employees",
-                            "localField": "emp_code",
-                            "foreignField": "emp_code",
-                            "as": "employee",
-                        }
-                    },
-                    {"$unwind": "$employee"},
-                    {
-                        "$match": {
-                            "$expr": {
-                                "$eq": [
-                                    "$employee.department",
-                                    "$$target_department",
-                                ]
-                            }
-                        }
-                    },
-                    {
-                        "$group": {
-                            "_id": None,
-                            "present_count": {
-                                "$sum": {
-                                    "$cond": [
-                                        {
-                                            "$in": [
-                                                "$status",
-                                                [
-                                                    "PRESENT",
-                                                    "WFH",
-                                                    "ON_DUTY",
-                                                ],
-                                            ]
-                                        },
-                                        {
-                                            "$cond": [
-                                                {"$eq": ["$half_day", True]},
-                                                0.5,
-                                                1,
-                                            ]
-                                        },
-                                        0,
-                                    ]
-                                }
-                            },
-                            "late_count": {
-                                "$sum": {
-                                    "$cond": [
-                                        {
-                                            "$gt": [
-                                                {
-                                                    "$ifNull": [
-                                                        "$late_minutes",
-                                                        0,
-                                                    ]
-                                                },
-                                                0,
-                                            ]
-                                        },
-                                        1,
-                                        0,
-                                    ]
-                                }
-                            },
-                        }
-                    },
-                ],
-                "as": "daily_attendance",
-            }
-        },
         {
             "$addFields": {
                 "headcount": {
-                    "$ifNull": [
-                        {"$arrayElemAt": ["$headcount_data.count", 0]},
-                        0,
-                    ]
+                    "$ifNull": [{"$arrayElemAt": ["$headcount_data.count", 0]}, 0]
                 },
                 "present_count": {
-                    "$ifNull": [
-                        {
-                            "$arrayElemAt": [
-                                "$daily_attendance.present_count",
-                                0,
-                            ]
+                    "$let": {
+                        "vars": {
+                            "day_counts": {
+                                "$arrayElemAt": [
+                                    {
+                                        "$filter": {
+                                            "input": "$attendance_by_date",
+                                            "as": "day_counts",
+                                            "cond": {"$eq": ["$$day_counts._id", "$date"]},
+                                        }
+                                    },
+                                    0,
+                                ]
+                            }
                         },
-                        0,
-                    ]
+                        "in": {"$ifNull": ["$$day_counts.present_count", 0]},
+                    }
                 },
                 "late_count": {
-                    "$ifNull": [
-                        {
-                            "$arrayElemAt": [
-                                "$daily_attendance.late_count",
-                                0,
-                            ]
+                    "$let": {
+                        "vars": {
+                            "day_counts": {
+                                "$arrayElemAt": [
+                                    {
+                                        "$filter": {
+                                            "input": "$attendance_by_date",
+                                            "as": "day_counts",
+                                            "cond": {"$eq": ["$$day_counts._id", "$date"]},
+                                        }
+                                    },
+                                    0,
+                                ]
+                            }
                         },
-                        0,
-                    ]
+                        "in": {"$ifNull": ["$$day_counts.late_count", 0]},
+                    }
                 },
                 "is_working_day": {
                     "$in": [
-                        {
-                            "$dayOfWeek": {
-                                "$dateFromString": {
-                                    "dateString": "$date"
-                                }
-                            }
-                        },
+                        {"$dayOfWeek": {"$dateFromString": {"dateString": "$date"}}},
                         [2, 3, 4, 5, 6],
                     ]
                 },
             }
         },
-
         # Attendance rate is null on weekends or when headcount is zero.
-        # Use floor(x + 0.5) for four-decimal half-up rounding.
+        # floor(x + 0.5) implements four-decimal half-up rounding for nonnegative rates.
         {
             "$addFields": {
                 "attendance_rate": {
                     "$cond": [
-                        {
-                            "$and": [
-                                "$is_working_day",
-                                {"$gt": ["$headcount", 0]},
-                            ]
-                        },
+                        {"$and": ["$is_working_day", {"$gt": ["$headcount", 0]}]},
                         {
                             "$divide": [
                                 {
@@ -2170,12 +2102,7 @@ def department_trend(
                                         "$add": [
                                             {
                                                 "$multiply": [
-                                                    {
-                                                        "$divide": [
-                                                            "$present_count",
-                                                            "$headcount",
-                                                        ]
-                                                    },
+                                                    {"$divide": ["$present_count", "$headcount"]},
                                                     10000,
                                                 ]
                                             },
@@ -2191,45 +2118,22 @@ def department_trend(
                 }
             }
         },
-
-        # Average the current date and up to six preceding dates.
+        # The window starts at the beginning of the requested range.
         {
             "$setWindowFields": {
                 "sortBy": {"date": 1},
-                "output": {
-                    "_avg7_raw": {
-                        "$avg": "$attendance_rate",
-                        "window": {"documents": [-6, 0]},
-                    }
-                },
+                "output": {"_avg7_raw": {"$avg": "$attendance_rate", "window": {"documents": [-6, 0]}}},
             }
         },
         {
             "$addFields": {
                 "moving_avg_7d": {
                     "$cond": [
-                        {
-                            "$eq": [
-                                {"$ifNull": ["$_avg7_raw", None]},
-                                None,
-                            ]
-                        },
+                        {"$eq": [{"$ifNull": ["$_avg7_raw", None]}, None]},
                         None,
                         {
                             "$divide": [
-                                {
-                                    "$floor": {
-                                        "$add": [
-                                            {
-                                                "$multiply": [
-                                                    "$_avg7_raw",
-                                                    10000,
-                                                ]
-                                            },
-                                            0.5,
-                                        ]
-                                    }
-                                },
+                                {"$floor": {"$add": [{"$multiply": ["$_avg7_raw", 10000]}, 0.5]}},
                                 10000,
                             ]
                         },
@@ -2259,6 +2163,7 @@ def department_trend(
         "department": department,
         "items": items,
     }
+
 
 def _valid_month(value: str) -> bool:
     try:
