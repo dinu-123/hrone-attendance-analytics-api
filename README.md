@@ -9,8 +9,6 @@ FastAPI and MongoDB implementation of the HROne Employee Attendance & Analytics 
 - `DATA_MODEL.md` — MongoDB collections and document structure.
 - `REVIEW.md` — Review of starter-code issues and fixes.
 - `DECISIONS.md` — Design and implementation decisions.
-- `sample_data/` — Sample employee and attendance documents.
-- `sample_seed.py` — Optional sample-data loader.
 
 ## Setup on Windows PowerShell
 
@@ -20,9 +18,10 @@ Run these commands from the project root:
 py -m venv .venv
 .\.venv\Scripts\Activate.ps1
 python -m pip install -r requirements.txt
+if (!(Test-Path .env)) { Copy-Item .env.example .env }
 ```
 
-Create `.env` from `.env.example` if it does not already exist. Configure `MONGO_URI` and `MONGO_DB` to match your MongoDB setup.
+Configure `MONGO_URI` and `MONGO_DB` in `.env` to match your MongoDB setup. The command above preserves an existing `.env` file instead of overwriting it.
 
 Ensure MongoDB is running before starting the API.
 
@@ -36,13 +35,11 @@ Health check: http://127.0.0.1:8000/health
 
 Interactive API documentation: http://127.0.0.1:8000/docs
 
-## Optional Sample Data
+## Test Data
 
-**Warning:** `sample_seed.py` deletes all existing documents in the configured `employees` and `attendance_logs` collections before loading sample data. Run it only against a disposable development database.
+Sample data files and the destructive seed script are intentionally excluded from the public repository. The evaluator supplies its own dataset, and `DATA_MODEL.md` documents the expected MongoDB collections and fields.
 
-```powershell
-python sample_seed.py
-```
+For local testing, use a dedicated disposable database and configure `MONGO_URI` and `MONGO_DB` in your local `.env` file.
 
 ## Verification
 
