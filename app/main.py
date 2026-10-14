@@ -14,6 +14,7 @@ from bson import json_util
 from datetime import datetime, time, timedelta, timezone
 from typing import Literal, Optional
 from contextvars import ContextVar
+from contextlib import asynccontextmanager
 
 from decimal import Decimal, ROUND_HALF_UP
 
@@ -31,7 +32,13 @@ db = client[os.getenv("MONGO_DB", "attendance_db")]
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
-app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    create_database_indexes()
+    yield
+
+
+app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0", lifespan=lifespan)
 
 # Used by the admin explain endpoint to capture an aggregation pipeline.
 _EXPLAIN_CAPTURE = ContextVar("EXPLAIN_CAPTURE", default=None)
@@ -278,7 +285,7 @@ class RegularizeIn(BaseModel):
 # Endpoints provided
 # --------------------------------------------------------------------------- #
 
-@app.on_event("startup")
+
 def create_database_indexes():
     # Employees: unique business identifier.
     db.employees.create_index(
@@ -589,6 +596,33 @@ def punch_out(body: PunchOutIn):
     )
 
     if record is None:
+        # Distinguish an earlier-than-punch-in timestamp from an
+        # employee who has no punch-in record at all.
+        later_record = db.attendance_logs.find_one(
+            {
+                "emp_code": body.emp_code,
+                "punch_in": {"$ne": None},
+            },
+            sort=[("punch_in", -1)],
+        )
+
+        if later_record is not None:
+            prior_punch_in = later_record["punch_in"]
+
+            if prior_punch_in.tzinfo is None:
+                prior_punch_in = prior_punch_in.replace(
+                    tzinfo=timezone.utc
+                )
+
+            if ts <= prior_punch_in:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "Punch-out must be after punch-in "
+                        "and within 24 hours"
+                    ),
+                )
+
         raise HTTPException(
             status_code=404,
             detail="No punch-in found",

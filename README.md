@@ -57,3 +57,14 @@ These tests do not guarantee a particular evaluator score or replace a complete 
 - Use `.env.example` to document the required environment variables.
 - Remove temporary backups before submitting.
 - Review staged files before committing or publishing the repository.
+
+## Automated Tests
+
+Install the development dependencies and run the full regression suite:
+
+```powershell
+python -m pip install -r requirements-dev.txt
+python -m pytest -v .\tests
+```
+
+MongoDB must be running locally. Tests use a separate disposable database named for the test process and drop only that test database after the test session. Keep normal and production databases separate from test databases.
