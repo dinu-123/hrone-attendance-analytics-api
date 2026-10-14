@@ -1,11 +1,11 @@
 # DECISIONS.md
 
-**Indexes.** At startup I create `uq_employees_emp_code` to enforce the employee business key; `ix_employees_department_emp_code` for department filtering and sorted employee listing; `ix_employees_joined_department` for join-date and headcount work; `uq_attendance_emp_date` to allow at most one record per employee per attendance date and protect punch-in races; `ix_attendance_date_emp` for date ordering and range scans; `ix_attendance_status_date_emp` for status-filtered date queries; and `ix_attendance_emp_punch_in` to find the latest eligible punch-in. I rejected a separate attendance `emp_code` index because it duplicates the leading-key capability of `uq_attendance_emp_date`.
+**Indexes.** Startup creates eight named indexes: unique `uq_employees_emp_code` for employee identity; `ix_employees_department_emp_code` for department filtering and employee-code ordering; `ix_employees_joined_department` for join-date and headcount queries; unique `uq_attendance_emp_date` for employee/day uniqueness; `ix_attendance_date_emp` for attendance date sorting and range scans; partial `ix_attendance_late_date_emp_partial` for leaderboard scans of positive late minutes; `ix_attendance_status_date_emp` for status/date filtering; and `ix_attendance_emp_punch_in` for latest punch-in lookup. Startup creation is idempotent.
 
-**Punch-in race.** Both requests attempt the insert. The unique compound index lets one win. The other raises `DuplicateKeyError`, converted to HTTP 409; uniqueness is not decided by a check-then-insert.
+**Punch-in race.** Both requests attempt insertion. The unique employee/date index accepts one; a duplicate-key error becomes HTTP 409 for the other. This avoids an unsafe check-then-insert.
 
-**Ties.** The leaderboard uses standard competition ranking on total late minutes, then filters `rank <= limit`. Everyone tied at the cutoff rank is returned, sorted by total late minutes descending and employee code ascending.
+**Ties.** MongoDB competition ranking assigns 1, 2, 2, 4 for tied totals. Filtering occurs after ranking, so every row tied at the cutoff is returned; ties sort by employee code.
 
-**Headcount.** The department summary starts from eligible employees, then looks up logs. Employees with no matching logs remain in the result, rather than being lost by starting from attendance.
+**Headcount.** The department summary starts from employees who joined on or before period end, then looks up logs. Eligible employees with no logs remain counted.
 
-**At 100x.** I would measure representative workloads and consider cursor-based pagination plus precomputed monthly summaries for expensive analytics.
+**At 100x.** I would profile representative queries, benchmark changing workloads, add cursor-based pagination, and consider precomputed monthly summaries for analytics where freshness requirements permit.
