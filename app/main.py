@@ -404,6 +404,14 @@ def create_database_indexes():
         name="ix_attendance_date_emp",
     )
 
+    # Attendance: support late-leaderboard date scans while excluding
+    # records that have no positive late duration.
+    db.attendance_logs.create_index(
+        [("date", 1), ("emp_code", 1), ("late_minutes", 1)],
+        name="ix_attendance_late_date_emp_partial",
+        partialFilterExpression={"late_minutes": {"$gt": 0}},
+    )
+
     # Attendance: support status-filtered date queries.
     db.attendance_logs.create_index(
         [("status", 1), ("date", -1), ("emp_code", 1)],

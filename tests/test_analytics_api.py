@@ -521,3 +521,32 @@ def test_department_trend_attendance_rate_uses_four_decimal_half_up(
     assert item["headcount"] == employee_count
     assert item["present_count"] == 1
     assert item["attendance_rate"] == 0.0078
+
+def test_monthly_percentage_rounding_expression_uses_four_decimal_half_up(
+    test_database,
+):
+    """1 / 128 * 100 = 0.78125 must round half-up to 0.7813."""
+    from bson.decimal128 import Decimal128
+    import app.main as main_module
+
+    result = next(
+        test_database.aggregate(
+            [
+                {
+                    "$documents": [
+                        {"present_days": 1, "working_days": 128}
+                    ]
+                },
+                {
+                    "$project": {
+                        "_id": 0,
+                        "attendance_pct": main_module._mongo_percentage_expression(
+                            "$present_days", "$working_days", 4
+                        ),
+                    }
+                },
+            ]
+        )
+    )
+
+    assert result["attendance_pct"] == Decimal128("0.7813")

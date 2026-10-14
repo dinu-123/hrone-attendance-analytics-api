@@ -305,3 +305,27 @@ def test_invalid_timestamp_precedes_unknown_employee_lookup(
         json={"emp_code": "EMP_UNKNOWN", "punched_at": timestamp},
     )
     assert response.status_code == 422, response.text
+
+@pytest.mark.parametrize(
+    "route",
+    ["/attendance/punch-in", "/attendance/punch-out"],
+)
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "1800000000000",
+        1_800_000_000_000.0,
+        1_800_000_000_000.5,
+    ],
+    ids=["numeric-string", "whole-number-float", "fractional-float"],
+)
+def test_punch_routes_reject_string_and_float_timestamps(
+    api_client, route, timestamp
+):
+    """Timestamp strings and floats must yield 422 before employee lookup."""
+    response = api_client.post(
+        route,
+        json={"emp_code": "EMP_UNKNOWN", "punched_at": timestamp},
+    )
+
+    assert response.status_code == 422, response.text
