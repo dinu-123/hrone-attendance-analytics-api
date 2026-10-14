@@ -1,16 +1,12 @@
-"""
-Employee Attendance & Analytics API - STARTER
+"""Employee Attendance & Analytics API.
 
-Run:  uvicorn app.main:app --port 8000
-Env:  MONGO_URI, MONGO_DB (a local .env is loaded for convenience)
-
-This file was written quickly by a colleague who has left the company. The happy path
-works, but nobody has reviewed it. Read PROBLEM_STATEMENT.docx for what is expected of you,
-openapi.yaml for the contract and DATA_MODEL.md for what is stored in MongoDB.
+Run from the repository root with ``uvicorn app.main:app --port 8000``.
+Configure MongoDB through ``MONGO_URI`` and ``MONGO_DB`` environment variables.
 """
 import os
 import json
 from bson import json_util
+from bson.decimal128 import Decimal128
 from datetime import datetime, time, timedelta, timezone
 from typing import Literal, Optional
 from contextvars import ContextVar
@@ -27,8 +23,15 @@ from pymongo.errors import DuplicateKeyError
 
 load_dotenv()
 
-client = MongoClient(os.getenv("MONGO_URI", "mongodb://localhost:27017"))
-db = client[os.getenv("MONGO_DB", "attendance_db")]
+MONGO_URI = os.getenv("MONGO_URI")
+MONGO_DB = os.getenv("MONGO_DB")
+if not MONGO_URI or not MONGO_DB:
+    raise RuntimeError(
+        "MONGO_URI and MONGO_DB must be configured in the environment or local .env file"
+    )
+
+client = MongoClient(MONGO_URI)
+db = client[MONGO_DB]
 
 IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -59,12 +62,6 @@ def aggregate_results(collection, pipeline):
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
-# def compute_late_minutes(punch_in: datetime, shift_start: str) -> int:
-#     h, m = map(int, shift_start.split(":"))
-#     start = punch_in.replace(hour=h, minute=m, second=0, microsecond=0)
-#     minutes = int((punch_in - start).total_seconds() / 60)
-#     return minutes if minutes > 10 else 0
-
 def compute_late_minutes(
     punch_in: datetime,
     shift_start: str,
@@ -150,9 +147,6 @@ def serialize_attendance(doc: dict) -> dict:
     }
 
 
-# def compute_work_hours(punch_in: datetime, punch_out: datetime) -> float:
-#     return round((punch_out - punch_in).total_seconds() / 3600, 2)
-
 def compute_work_hours(punch_in: datetime, punch_out: datetime) -> float:
     if punch_in.tzinfo is None:
         punch_in = punch_in.replace(tzinfo=timezone.utc)
@@ -168,11 +162,6 @@ def compute_work_hours(punch_in: datetime, punch_out: datetime) -> float:
 
     return float(hours)
 
-
-# def compute_overtime(punch_out: datetime, shift_end: str, date_str: str) -> int:
-#     h, m = map(int, shift_end.split(":"))
-#     end = datetime.fromisoformat(date_str).replace(hour=h, minute=m, tzinfo=IST)
-#     return max(0, int((punch_out - end).total_seconds() / 60))
 
 def compute_overtime(
     punch_out: datetime,
@@ -284,6 +273,102 @@ class RegularizeIn(BaseModel):
 # --------------------------------------------------------------------------- #
 # Endpoints provided
 # --------------------------------------------------------------------------- #
+
+
+def _mongo_decimal_expression(value_expression):
+    """Convert a numeric aggregation expression to decimal through its text form.
+
+    Stored attendance hours are already rounded to two decimal places. Converting
+    via MongoDB's shortest numeric string avoids carrying binary-float artifacts
+    into decimal half-up rounding.
+    """
+    return {
+        "$convert": {
+            "input": {"$toString": value_expression},
+            "to": "decimal",
+            "onError": Decimal128("0"),
+            "onNull": Decimal128("0"),
+        }
+    }
+
+
+def _mongo_half_up_round_expression(value_expression, decimal_places):
+    """Build a non-negative decimal half-up rounding expression for MongoDB.
+
+    MongoDB's $round uses ties-to-even, which differs from the assignment's
+    explicit half-up convention. These analytics quantities are non-negative.
+    """
+    scale = Decimal128(str(10 ** decimal_places))
+    scaled = {
+        "$multiply": [
+            _mongo_decimal_expression(value_expression),
+            scale,
+        ]
+    }
+    return {
+        "$divide": [
+            {"$floor": {"$add": [scaled, Decimal128("0.5")]}},
+            scale,
+        ]
+    }
+
+
+def _mongo_ratio_expression(numerator_expression, denominator_expression, decimal_places):
+    """Compute and half-up round a ratio without converting it to a percentage."""
+    ratio = {
+        "$divide": [
+            _mongo_decimal_expression(numerator_expression),
+            _mongo_decimal_expression(denominator_expression),
+        ]
+    }
+    return _mongo_half_up_round_expression(ratio, decimal_places)
+
+
+def _mongo_percentage_expression(numerator_expression, denominator_expression, decimal_places):
+    """Compute and half-up round a percentage without binary-float arithmetic."""
+    percentage = {
+        "$multiply": [
+            {
+                "$divide": [
+                    _mongo_decimal_expression(numerator_expression),
+                    _mongo_decimal_expression(denominator_expression),
+                ]
+            },
+            Decimal128("100"),
+        ]
+    }
+    return _mongo_half_up_round_expression(percentage, decimal_places)
+
+
+def resolve_punch_timestamp(punched_at: Optional[int], was_supplied: bool) -> datetime:
+    """Validate and normalize an optional epoch-millisecond timestamp.
+
+    Run this before employee/database lookups so malformed timestamps always
+    produce the contractually required 422 rather than a misleading 404.
+    """
+    if was_supplied and punched_at is None:
+        raise HTTPException(
+            status_code=422,
+            detail="punched_at must be epoch milliseconds",
+        )
+
+    if punched_at is None:
+        return datetime.now(timezone.utc).replace(microsecond=0)
+
+    if punched_at < 100_000_000_000 or punched_at > 4_102_444_800_000:
+        raise HTTPException(
+            status_code=422,
+            detail="punched_at must be epoch milliseconds",
+        )
+
+    try:
+        # Integer division truncates milliseconds to whole seconds as R1 requires.
+        return datetime.fromtimestamp(punched_at // 1000, tz=timezone.utc)
+    except (OverflowError, OSError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail="punched_at is out of range",
+        )
 
 
 def create_database_indexes():
@@ -399,7 +484,14 @@ def list_employees(
     if department is not None:
         query["department"] = department
 
-    total = db.employees.count_documents(query)
+    if query:
+        total = db.employees.count_documents(query)
+    else:
+        # A hinted count scans the compact business-key index rather than the
+        # entire employee collection. The index is created idempotently at startup.
+        total = db.employees.count_documents(
+            {}, hint="uq_employees_emp_code"
+        )
 
     skip = (page - 1) * page_size
 
@@ -428,72 +520,18 @@ def list_employees(
 
 
 
-# @app.post("/attendance/punch-in", status_code=201)
-# def punch_in(body: PunchInIn):
-#     emp = db.employees.find_one({"emp_code": body.emp_code})
-#     ts = datetime.fromtimestamp(body.punched_at / 1000) if body.punched_at else datetime.now()
-#     d = ts.date().isoformat()
-#     if db.attendance_logs.find_one({"emp_code": body.emp_code, "date": d}):
-#         raise HTTPException(409, "already punched in for this date")
-#     doc = {
-#         "emp_code": body.emp_code,
-#         "date": d,
-#         "status": body.status,
-#         "punch_in": ts,
-#         "punch_out": None,
-#         "work_hours": None,
-#         "late_minutes": compute_late_minutes(ts, emp["shift_start"]),
-#         "overtime_minutes": 0,
-#         "half_day": False,
-#         "history": [],
-#     }
-#     res = db.attendance_logs.insert_one(doc)
-#     doc["id"] = str(res.inserted_id)
-#     doc.pop("_id", None)
-#     return doc
-
 @app.post("/attendance/punch-in", status_code=201)
 def punch_in(body: PunchInIn):
-    if "punched_at" in body.model_fields_set and body.punched_at is None:
-            raise HTTPException(
-                status_code=422,
-                detail="punched_at must be epoch milliseconds",
-            )
-    emp = db.employees.find_one({"emp_code": body.emp_code})
+    ts = resolve_punch_timestamp(
+        body.punched_at, "punched_at" in body.model_fields_set
+    )
 
+    emp = db.employees.find_one({"emp_code": body.emp_code})
     if emp is None:
         raise HTTPException(
             status_code=404,
             detail="Employee not found",
         )
-
-    # Use current UTC time if punched_at was omitted.
-    if body.punched_at is None:
-        ts = datetime.now(timezone.utc).replace(microsecond=0)
-    else:
-        punched_at = body.punched_at
-
-        # Reject seconds-like timestamps and out-of-range values.
-        if (
-            punched_at < 100_000_000_000
-            or punched_at > 4_102_444_800_000
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail="punched_at must be epoch milliseconds",
-            )
-
-        try:
-            # Integer division truncates milliseconds to whole seconds.
-            ts = datetime.fromtimestamp(
-                punched_at // 1000,
-                tz=timezone.utc,
-            )
-        except (OverflowError, OSError, ValueError):
-            raise HTTPException(
-                status_code=422,
-                detail="punched_at is out of range",
-            )
 
     punch_ist = ts.astimezone(IST)
     attendance_day = punch_ist.date()
@@ -548,43 +586,16 @@ def punch_in(body: PunchInIn):
 
 @app.post("/attendance/punch-out")
 def punch_out(body: PunchOutIn):
-    if "punched_at" in body.model_fields_set and body.punched_at is None:
-        raise HTTPException(
-            status_code=422,
-            detail="punched_at must be epoch milliseconds",
-        )
-    emp = db.employees.find_one({"emp_code": body.emp_code})
+    ts = resolve_punch_timestamp(
+        body.punched_at, "punched_at" in body.model_fields_set
+    )
 
+    emp = db.employees.find_one({"emp_code": body.emp_code})
     if emp is None:
         raise HTTPException(
             status_code=404,
             detail="Employee not found",
         )
-
-    if body.punched_at is None:
-        ts = datetime.now(timezone.utc).replace(microsecond=0)
-    else:
-        punched_at = body.punched_at
-
-        if (
-            punched_at < 100_000_000_000
-            or punched_at > 4_102_444_800_000
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail="punched_at must be epoch milliseconds",
-            )
-
-        try:
-            ts = datetime.fromtimestamp(
-                punched_at // 1000,
-                tz=timezone.utc,
-            )
-        except (OverflowError, OSError, ValueError):
-            raise HTTPException(
-                status_code=422,
-                detail="punched_at is out of range",
-            )
 
     # Find the most recent punch-in at or before this punch-out.
     record = db.attendance_logs.find_one(
@@ -1090,7 +1101,13 @@ def list_attendance(
 
         query["date"] = date_filter
 
-    total = db.attendance_logs.count_documents(query)
+    if query:
+        total = db.attendance_logs.count_documents(query)
+    else:
+        # Keep even the unfiltered total count index-backed at 100k+ records.
+        total = db.attendance_logs.count_documents(
+            {}, hint="ix_attendance_date_emp"
+        )
     skip = (page - 1) * page_size
 
     records = list(
@@ -1115,17 +1132,6 @@ def list_attendance(
     }
 
 
-
-# --------------------------------------------------------------------------- #
-# TODO - the rest of the contract (see openapi.yaml):
-#   POST  /attendance/punch-out
-#   PATCH /attendance/{emp_code}/{date}
-#   GET   /analytics/employees/{emp_code}/monthly
-#   GET   /analytics/departments/summary
-#   GET   /analytics/leaderboard/late
-#   GET   /analytics/departments/{department}/trend
-#   GET   /admin/explain/{endpoint}
-# --------------------------------------------------------------------------- #
 
 @app.get("/analytics/employees/{emp_code}/monthly")
 def employee_monthly(emp_code: str, month: str):
@@ -1414,29 +1420,9 @@ def employee_monthly(emp_code: str, month: str):
                 "_attendance_pct": {
                     "$cond": [
                         {"$gt": ["$_working_days", 0]},
-                        {
-                            "$divide": [
-                                {
-                                    "$floor": {
-                                        "$add": [
-                                            {
-                                                "$multiply": [
-                                                    {
-                                                        "$divide": [
-                                                            "$_present_days",
-                                                            "$_working_days",
-                                                        ]
-                                                    },
-                                                    1000000,
-                                                ]
-                                            },
-                                            0.5,
-                                        ]
-                                    }
-                                },
-                                10000,
-                            ]
-                        },
+                        _mongo_percentage_expression(
+                            "$_present_days", "$_working_days", 4
+                        ),
                         None,
                     ]
                 }
@@ -1453,7 +1439,7 @@ def employee_monthly(emp_code: str, month: str):
                 "late_count": "$_late_count",
                 "total_late_minutes": "$_total_late_minutes",
                 "total_overtime_minutes": "$_total_overtime_minutes",
-                "attendance_pct": "$_attendance_pct",
+                "attendance_pct": {"$toDouble": "$_attendance_pct"},
             }
         },
     ]
@@ -1650,8 +1636,8 @@ def department_summary(
                                     "$_has_hours",
                                 ]
                             },
-                            "$logs.work_hours",
-                            0,
+                            _mongo_decimal_expression("$logs.work_hours"),
+                            Decimal128("0"),
                         ]
                     }
                 },
@@ -1750,29 +1736,15 @@ def department_summary(
                 "avg_work_hours": {
                     "$cond": [
                         {"$gt": ["$hours_count", 0]},
-                        {
-                            "$divide": [
-                                {
-                                    "$floor": {
-                                        "$add": [
-                                            {
-                                                "$multiply": [
-                                                    {
-                                                        "$divide": [
-                                                            "$hours_sum",
-                                                            "$hours_count",
-                                                        ]
-                                                    },
-                                                    100,
-                                                ]
-                                            },
-                                            0.5,
-                                        ]
-                                    }
-                                },
-                                100,
-                            ]
-                        },
+                        _mongo_half_up_round_expression(
+                            {
+                                "$divide": [
+                                    "$hours_sum",
+                                    _mongo_decimal_expression("$hours_count"),
+                                ]
+                            },
+                            2,
+                        ),
                         None,
                     ]
                 },
@@ -1785,7 +1757,7 @@ def department_summary(
                 "department": "$_id",
                 "headcount": 1,
                 "present_days": 1,
-                "avg_work_hours": 1,
+                "avg_work_hours": {"$toDouble": "$avg_work_hours"},
                 "late_count": 1,
                 "total_late_minutes": 1,
                 "leave_count": 1,
@@ -2122,31 +2094,16 @@ def department_trend(
                 },
             }
         },
-        # Attendance rate is null on weekends or when headcount is zero.
-        # floor(x + 0.5) implements four-decimal half-up rounding for nonnegative rates.
+        # Keep the rate as Decimal128 until final projection so exact halfway
+        # values follow the contract's four-decimal half-up rule.
         {
             "$addFields": {
                 "attendance_rate": {
                     "$cond": [
                         {"$and": ["$is_working_day", {"$gt": ["$headcount", 0]}]},
-                        {
-                            "$divide": [
-                                {
-                                    "$floor": {
-                                        "$add": [
-                                            {
-                                                "$multiply": [
-                                                    {"$divide": ["$present_count", "$headcount"]},
-                                                    10000,
-                                                ]
-                                            },
-                                            0.5,
-                                        ]
-                                    }
-                                },
-                                10000,
-                            ]
-                        },
+                        _mongo_ratio_expression(
+                            "$present_count", "$headcount", 4
+                        ),
                         None,
                     ]
                 }
@@ -2165,12 +2122,7 @@ def department_trend(
                     "$cond": [
                         {"$eq": [{"$ifNull": ["$_avg7_raw", None]}, None]},
                         None,
-                        {
-                            "$divide": [
-                                {"$floor": {"$add": [{"$multiply": ["$_avg7_raw", 10000]}, 0.5]}},
-                                10000,
-                            ]
-                        },
+                        _mongo_half_up_round_expression("$_avg7_raw", 4),
                     ]
                 }
             }
@@ -2185,8 +2137,8 @@ def department_trend(
                 "headcount": 1,
                 "present_count": 1,
                 "late_count": 1,
-                "attendance_rate": 1,
-                "moving_avg_7d": 1,
+                "attendance_rate": {"$toDouble": "$attendance_rate"},
+                "moving_avg_7d": {"$toDouble": "$moving_avg_7d"},
             }
         },
     ]
@@ -2280,25 +2232,18 @@ def explain_endpoint(
             if date_to is not None:
                 query["date"]["$lte"] = date_to
 
-        cursor = (
-            db.attendance_logs.find(query)
-            .sort([("date", -1), ("emp_code", 1)])
-            .skip((page - 1) * page_size)
-            .limit(page_size)
-        )
-
         try:
-            raw_explain = raw_explain = db.command(
-    "explain",
-    {
-        "find": "attendance_logs",
-        "filter": query,
-        "sort": {"date": -1, "emp_code": 1},
-        "skip": (page - 1) * page_size,
-        "limit": page_size,
-    },
-    verbosity="executionStats",
-)
+            raw_explain = db.command(
+                "explain",
+                {
+                    "find": "attendance_logs",
+                    "filter": query,
+                    "sort": {"date": -1, "emp_code": 1},
+                    "skip": (page - 1) * page_size,
+                    "limit": page_size,
+                },
+                verbosity="executionStats",
+            )
         except Exception:
             raise HTTPException(
                 status_code=503,

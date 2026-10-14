@@ -293,3 +293,15 @@ def test_overnight_punch_in_uses_shift_start_date(api_client):
 
     assert response.status_code == 201, response.text
     assert response.json()["date"] == "2026-10-13"
+
+
+@pytest.mark.parametrize("route", ["/attendance/punch-in", "/attendance/punch-out"])
+@pytest.mark.parametrize("timestamp", [None, 1_700_000_000, 5_000_000_000_000])
+def test_invalid_timestamp_precedes_unknown_employee_lookup(
+    api_client, route, timestamp
+):
+    response = api_client.post(
+        route,
+        json={"emp_code": "EMP_UNKNOWN", "punched_at": timestamp},
+    )
+    assert response.status_code == 422, response.text

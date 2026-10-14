@@ -43,13 +43,13 @@ For local testing, use a dedicated disposable database and configure `MONGO_URI`
 
 ## Verification
 
-Focused manual tests covered timestamp handling, overnight shifts, late and overtime calculations, punch-in and punch-out concurrency, regularization and audit history, analytics, pagination, and validation.
+Previous focused manual test runs covered timestamp handling, overnight shifts, late and overtime calculations, punch-in and punch-out concurrency, regularization and audit history, analytics, pagination, and validation. Re-run the complete suite after the latest rounding, count-index and validation-order changes.
 
-The five explain endpoints were tested against a synthetic dataset of 10,000 employees and 100,000 attendance records. All five reported at least one `IXSCAN` stage and no `COLLSCAN` stage. The department trend lookup also reported zero collection scans and used the attendance and employee indexes.
+A previous local benchmark used a synthetic dataset of 10,000 employees and 100,000 attendance records. The five explain endpoints reported at least one `IXSCAN` stage and no `COLLSCAN` stage, and the department trend lookup used attendance and employee indexes. The benchmark database was deleted afterward. These results predate the final decimal-rounding and unfiltered-count changes; rerun the benchmark and explain checks against the current code before treating them as final verification.
 
-The department trend optimization was tested for a 10-day Engineering range. Using the same three-request benchmark, the original median was 8,751.1 ms and the optimized version's median was 458.4 ms, approximately 94.8% lower. In a separate run with one warm-up and five measured requests, the optimized median was 426.3 ms. These are local measurements, not a controlled production benchmark. The optimized response matched the original daily fields. Additional checks covered mid-month joiners, missing-attendance dates, weekends, the 92-day limit, and invalid date ranges. The disposable synthetic benchmark database was deleted after testing; no benchmark dataset is included in this repository.
+Earlier department-trend measurements showed an approximately 94.8% lower median response time after optimization (8,751.1 ms before and 458.4 ms after in the same three-request local benchmark). These are historical local measurements, not a controlled production benchmark.
 
-These tests do not guarantee a particular evaluator score or replace a complete automated regression suite.
+The automated regression suite lives in `tests/`. Run it with the development dependencies installed and MongoDB available. Passing tests do not guarantee a particular evaluator score or hidden-dataset outcome.
 
 ## Submission Safety
 

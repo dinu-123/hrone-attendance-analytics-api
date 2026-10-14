@@ -455,3 +455,69 @@ def test_department_trend_unknown_department_returns_404(api_client):
         params={"from": "2026-10-05", "to": "2026-10-06"},
     )
     assert response.status_code == 404
+
+
+def test_department_average_work_hours_uses_decimal_half_up_rounding(
+    api_client, test_database
+):
+    """1.00 and 1.01 average to 1.005, which rounds half-up to 1.01."""
+    db = test_database
+    seed_employee(db, emp_code="EMP9101", department="Rounding")
+    seed_log(
+        db,
+        emp_code="EMP9101",
+        date="2026-10-05",
+        status="PRESENT",
+        work_hours=1.00,
+    )
+    seed_log(
+        db,
+        emp_code="EMP9101",
+        date="2026-10-06",
+        status="PRESENT",
+        work_hours=1.01,
+    )
+
+    response = api_client.get(
+        "/analytics/departments/summary",
+        params={"month": "2026-10", "department": "Rounding"},
+    )
+
+    assert response.status_code == 200, response.text
+    item = response.json()["items"][0]
+    assert item["avg_work_hours"] == 1.01
+
+
+def test_department_trend_attendance_rate_uses_four_decimal_half_up(
+    api_client, test_database
+):
+    """1 of 128 employees gives 0.0078125, which rounds to 0.0078."""
+    db = test_database
+    employee_count = 128
+    employees = [
+        employee_doc(
+            emp_code=f"EMP{9200 + i:04d}",
+            department="RateRounding",
+            joined_on="2026-10-01",
+        )
+        for i in range(employee_count)
+    ]
+    db.employees.insert_many(employees)
+    seed_log(
+        db,
+        emp_code="EMP9200",
+        date="2026-10-05",  # Monday
+        status="PRESENT",
+        half_day=False,
+    )
+
+    response = api_client.get(
+        "/analytics/departments/RateRounding/trend",
+        params={"from": "2026-10-05", "to": "2026-10-05"},
+    )
+
+    assert response.status_code == 200, response.text
+    item = response.json()["items"][0]
+    assert item["headcount"] == employee_count
+    assert item["present_count"] == 1
+    assert item["attendance_rate"] == 0.0078
